@@ -32,10 +32,18 @@ def build_client() -> HospitalityClient:
     backend = os.environ.get("HOSPITALITY_BACKEND", "mock").lower()
     if backend == "mock":
         return MockClient()
-    # Plug a real PMS client here, e.g.:
-    #   if backend == "turno": return TurnoClient(api_key=os.environ["TURNO_API_KEY"])
+    if backend == "hospitable":
+        token = os.environ.get("HOSPITABLE_ACCESS_TOKEN")
+        if not token:
+            raise ValueError(
+                "HOSPITALITY_BACKEND=hospitable requires HOSPITABLE_ACCESS_TOKEN "
+                "(a Hospitable Personal Access Token)."
+            )
+        from .hospitable import HospitableClient
+
+        return HospitableClient(token=token)
     raise ValueError(
-        f"Unknown HOSPITALITY_BACKEND={backend!r}. Only 'mock' is wired up so far."
+        f"Unknown HOSPITALITY_BACKEND={backend!r}. Use 'mock' or 'hospitable'."
     )
 
 

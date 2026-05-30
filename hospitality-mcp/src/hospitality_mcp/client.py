@@ -40,7 +40,7 @@ class HospitalityClient(abc.ABC):
     def get_guest(self, guest_id: str) -> Optional[Guest]: ...
 
     @abc.abstractmethod
-    def turnovers_on(self, day: date) -> List[Turnover]: ...
+    def cleaner_for(self, property_id: str) -> Optional[str]: ...
 
     @abc.abstractmethod
     def check_ins_on(self, day: date) -> List[Reservation]: ...
@@ -59,6 +59,79 @@ class HospitalityClient(abc.ABC):
 
     @abc.abstractmethod
     def send_guest_message(self, reservation_id: str, message: str) -> Dict[str, str]: ...
+
+    # --- shared derivations (built on the primitives above) ----------------
+    def _property_name(self, property_id: str) -> str:
+        prop = self.get_property(property_id)
+        return prop.name if prop else property_id
+
+    def turnovers_on(self, day: date) -> List[Turnover]:
+        """Derive turnovers from check-ins and check-outs on ``day``.
+
+        A property has a turnover when it has a check-out, a check-in, or both
+        (a same-day turnaround) on the date. This logic is backend-agnostic: it
+        relies only on the abstract primitives, so it works identically over
+        mock data or a live PMS that exposes reservations.
+        """
+        check_outs = {r.property_id: r for r in self.check_outs_on(day)}
+        check_ins = {r.property_id: r for r in self.check_ins_on(day)}
+        property_ids = sorted(set(check_outs) | set(check_ins))
+        open_complaints = [
+            c for c in self.complaints() if c.status != ComplaintStatus.RESOLVED
+        ]
+
+        turnovers: List[Turnover] = []
+        for pid in property_ids:
+            out_res = check_outs.get(pid)
+            in_res = check_ins.get(pid)
+            same_day = out_res is not None and in_res is not None
+
+            notes: List[str] = []
+            if out_res:
+                if out_res.late_check_out:
+                    notes.append("Departing guest has a LATE checkout - cleaning starts later.")
+                if out_res.luggage_hold:
+                    notes.append("Departing guest is leaving luggage for later pickup.")
+                if out_res.notes:
+                    notes.append(f"Checkout note: {out_res.notes}")
+            if in_res:
+                if in_res.early_check_in:
+                    notes.append("Arriving guest requested EARLY check-in - tight cleaning window.")
+                guest = self.get_guest(in_res.guest_id)
+                if guest and guest.vip:
+                    notes.append("Arriving guest is a VIP - extra prep / welcome touch.")
+                if in_res.notes:
+                    notes.append(f"Check-in note: {in_res.notes}")
+
+            open_here = [c for c in open_complaints if c.property_id == pid]
+            for c in open_here:
+                notes.append(f"OPEN issue ({c.severity.value}): {c.description}")
+
+            if same_day:
+                priority = "high"
+            else:
+                priority = "normal"
+            if any(c.severity.value in ("high", "urgent") for c in open_here):
+                priority = "high"
+
+            turnovers.append(
+                Turnover(
+                    property_id=pid,
+                    property_name=self._property_name(pid),
+                    date=day,
+                    check_out_reservation_id=out_res.id if out_res else None,
+                    check_in_reservation_id=in_res.id if in_res else None,
+                    cleaning_status=CleaningStatus.SCHEDULED,
+                    cleaner=self.cleaner_for(pid),
+                    same_day_turnaround=same_day,
+                    priority=priority,
+                    notes=notes,
+                )
+            )
+
+        order = {"high": 0, "normal": 1, "low": 2}
+        turnovers.sort(key=lambda t: order.get(t.priority, 1))
+        return turnovers
 
 
 class MockClient(HospitalityClient):
@@ -88,9 +161,8 @@ class MockClient(HospitalityClient):
     def get_guest(self, guest_id: str) -> Optional[Guest]:
         return next((g for g in self._guests if g.id == guest_id), None)
 
-    def _property_name(self, property_id: str) -> str:
-        prop = self.get_property(property_id)
-        return prop.name if prop else property_id
+    def cleaner_for(self, property_id: str) -> Optional[str]:
+        return self._cleaners.get(property_id)
 
     # --- daily operations --------------------------------------------------
     def check_ins_on(self, day: date) -> List[Reservation]:
@@ -98,73 +170,6 @@ class MockClient(HospitalityClient):
 
     def check_outs_on(self, day: date) -> List[Reservation]:
         return [r for r in self._reservations if r.check_out == day]
-
-    def turnovers_on(self, day: date) -> List[Turnover]:
-        check_outs = {r.property_id: r for r in self.check_outs_on(day)}
-        check_ins = {r.property_id: r for r in self.check_ins_on(day)}
-        property_ids = sorted(set(check_outs) | set(check_ins))
-
-        turnovers: List[Turnover] = []
-        for pid in property_ids:
-            out_res = check_outs.get(pid)
-            in_res = check_ins.get(pid)
-            same_day = out_res is not None and in_res is not None
-
-            notes: List[str] = []
-            if out_res:
-                if out_res.late_check_out:
-                    notes.append("Departing guest has a LATE checkout - cleaning starts later.")
-                if out_res.luggage_hold:
-                    notes.append("Departing guest is leaving luggage for later pickup.")
-                if out_res.notes:
-                    notes.append(f"Checkout note: {out_res.notes}")
-            if in_res:
-                if in_res.early_check_in:
-                    notes.append("Arriving guest requested EARLY check-in - tight cleaning window.")
-                guest = self.get_guest(in_res.guest_id)
-                if guest and guest.vip:
-                    notes.append("Arriving guest is a VIP - extra prep / welcome touch.")
-                if in_res.notes:
-                    notes.append(f"Check-in note: {in_res.notes}")
-
-            # Flag any open complaints at this property.
-            open_here = [
-                c for c in self._complaints
-                if c.property_id == pid and c.status != ComplaintStatus.RESOLVED
-            ]
-            for c in open_here:
-                notes.append(f"OPEN issue ({c.severity.value}): {c.description}")
-
-            if same_day:
-                priority = "high"
-                cleaning = CleaningStatus.SCHEDULED
-            elif out_res and not in_res:
-                priority = "normal"
-                cleaning = CleaningStatus.SCHEDULED
-            else:  # check-in only (property was vacant) - still needs a fresh clean
-                priority = "normal"
-                cleaning = CleaningStatus.SCHEDULED
-            if any(c.severity.value in ("high", "urgent") for c in open_here):
-                priority = "high"
-
-            turnovers.append(
-                Turnover(
-                    property_id=pid,
-                    property_name=self._property_name(pid),
-                    date=day,
-                    check_out_reservation_id=out_res.id if out_res else None,
-                    check_in_reservation_id=in_res.id if in_res else None,
-                    cleaning_status=cleaning,
-                    cleaner=self._cleaners.get(pid),
-                    same_day_turnaround=same_day,
-                    priority=priority,
-                    notes=notes,
-                )
-            )
-        # Highest priority first.
-        order = {"high": 0, "normal": 1, "low": 2}
-        turnovers.sort(key=lambda t: order.get(t.priority, 1))
-        return turnovers
 
     def complaints(self, *, status: Optional[ComplaintStatus] = None) -> List[Complaint]:
         items = list(self._complaints)

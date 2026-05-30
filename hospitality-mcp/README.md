@@ -50,6 +50,33 @@ hospitality-mcp            # runs the server over stdio
 # or: python -m hospitality_mcp
 ```
 
+### Backends
+
+Selected via the `HOSPITALITY_BACKEND` env var:
+
+| Backend | Data source | Extra env |
+| --- | --- | --- |
+| `mock` (default) | Bundled in-memory data, anchored to today | — |
+| `hospitable` | Live [Hospitable Public API v2](https://developer.hospitable.com/docs/public-api-docs/) | `HOSPITABLE_ACCESS_TOKEN` |
+
+Get a token from Hospitable: **Settings → API & Webhooks → Personal Access
+Token** (requires a paid Host/Professional/Mogul plan). Then:
+
+```bash
+export HOSPITALITY_BACKEND=hospitable
+export HOSPITABLE_ACCESS_TOKEN=hospitable_pat_xxx
+hospitality-mcp
+```
+
+What maps to Hospitable, and what doesn't:
+
+| Concept | Source in Hospitable |
+| --- | --- |
+| Properties, reservations, guests | `GET /properties`, `GET /reservations` (`include=guest,properties`) |
+| Turnovers / same-day turnarounds | **Derived** from real check-in / check-out dates |
+| Send guest message | `POST /reservations/{id}/messages` |
+| Cleaners, complaints, luggage holds | **Not in the Hospitable API** — return empty for now |
+
 ### Use it from a client (e.g. Claude Code / Claude Desktop)
 
 ```json
@@ -57,7 +84,10 @@ hospitality-mcp            # runs the server over stdio
   "mcpServers": {
     "hospitality": {
       "command": "hospitality-mcp",
-      "env": { "HOSPITALITY_BACKEND": "mock" }
+      "env": {
+        "HOSPITALITY_BACKEND": "hospitable",
+        "HOSPITABLE_ACCESS_TOKEN": "hospitable_pat_xxx"
+      }
     }
   }
 }
@@ -75,17 +105,20 @@ src/hospitality_mcp/
   mock_data.py   in-memory dataset, generated relative to today
   models.py      dataclasses (Property, Reservation, Turnover, Complaint, ...)
   dates.py       flexible day parsing ("tomorrow", "+2", ISO, weekday)
+  hospitable.py  live Hospitable Public API v2 client (HospitalityClient)
 ```
 
-### Going live against a real PMS
+### Going live / adding another PMS
 
-`MockClient` implements the `HospitalityClient` interface. To connect a real
-system (Turno, Guesty, Hostaway, a custom HTTP endpoint, …):
+`MockClient` and `HospitableClient` both implement the `HospitalityClient`
+interface, and the turnover/briefing derivation lives in the base class — so a
+backend only needs to supply the primitives (properties, reservations, guests,
+check-ins/outs). To add another system (Guesty, Hostaway, a custom endpoint, …):
 
-1. Add a subclass, e.g. `TurnoClient(HospitalityClient)`, that makes HTTP calls
-   and returns the same model objects.
-2. Wire it into `build_client()` in `server.py`, selected by the
-   `HOSPITALITY_BACKEND` env var.
+1. Add a subclass that makes HTTP calls and returns the same model objects
+   (use `hospitable.py` as the template).
+2. Wire it into `build_client()` in `server.py`, selected by
+   `HOSPITALITY_BACKEND`.
 
 No tool code changes — the tools depend only on the interface.
 
