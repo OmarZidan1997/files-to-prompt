@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from . import briefing
 from .client import HospitalityClient, MockClient
 from .dates import DateParseError, parse_day
 from .models import ComplaintStatus, serialize
@@ -69,48 +70,7 @@ def daily_briefing(day: str = "tomorrow") -> Dict[str, Any]:
     an offset like '+2'. This is the best tool for "what do I need to know
     about tomorrow's turnovers and guests".
     """
-    d = _resolve_day(day)
-    turnovers = client.turnovers_on(d)
-    check_ins = client.check_ins_on(d)
-    check_outs = client.check_outs_on(d)
-    open_complaints = [
-        c for c in client.complaints() if c.status != ComplaintStatus.RESOLVED
-    ]
-    luggage = client.luggage_holds(active_only=True)
-
-    alerts: List[str] = []
-    for t in turnovers:
-        if t.same_day_turnaround:
-            alerts.append(
-                f"SAME-DAY TURNAROUND at {t.property_name}: clean between checkout and check-in."
-            )
-        if t.priority == "high" and not t.same_day_turnaround:
-            alerts.append(f"High-priority turnover at {t.property_name}.")
-    for c in open_complaints:
-        if c.severity.value in ("high", "urgent"):
-            prop = client.get_property(c.property_id)
-            name = prop.name if prop else c.property_id
-            alerts.append(f"{c.severity.value.upper()} open issue at {name}: {c.description}")
-
-    return serialize(
-        {
-            "date": d,
-            "summary": {
-                "turnovers": len(turnovers),
-                "check_ins": len(check_ins),
-                "check_outs": len(check_outs),
-                "open_complaints": len(open_complaints),
-                "luggage_holds": len(luggage),
-                "same_day_turnarounds": sum(1 for t in turnovers if t.same_day_turnaround),
-            },
-            "alerts": alerts,
-            "turnovers": turnovers,
-            "check_ins": check_ins,
-            "check_outs": check_outs,
-            "open_complaints": open_complaints,
-            "luggage_holds": luggage,
-        }
-    )
+    return briefing.daily_briefing(client, day)
 
 
 @mcp.tool()
@@ -119,7 +79,7 @@ def list_turnovers(day: str = "tomorrow") -> List[Dict[str, Any]]:
     cleaning assignment and important notes (late checkout, early check-in,
     VIP, luggage, open issues). `day` accepts the same formats as daily_briefing.
     """
-    return serialize(client.turnovers_on(_resolve_day(day)))
+    return briefing.list_turnovers(client, day)
 
 
 @mcp.tool()

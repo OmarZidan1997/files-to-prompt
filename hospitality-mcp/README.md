@@ -1,17 +1,81 @@
 # hospitality-mcp
 
 An [MCP](https://modelcontextprotocol.io) server for hospitality / vacation-rental
-operations. It lets an LLM answer everyday operational questions such as:
+operations, built around **Hospitable**. It lets an LLM answer everyday
+operational questions such as:
 
 > "Get me all the turnovers tomorrow and any important notes I need to know —
 > upcoming and current guests, complaints, luggage, anything per turnover or
 > check-in."
 
-It ships with a **realistic mock dataset** (anchored to *today*, so "tomorrow"
-always has data) behind a pluggable client, so you can run and demo it
-immediately and wire it to a real PMS later **without changing any tool code**.
+There are two ways to run it:
 
-## What it does
+1. **Gateway (recommended)** — `hospitable-gateway` connects to Hospitable's
+   own hosted MCP server, **re-exposes all of its tools**, and **adds** our
+   custom composite tools (most importantly `daily_turnover_briefing`). One
+   endpoint, every Hospitable tool *plus* the turnover briefing. ✅ verified
+   live against a real Hospitable account.
+2. **Standalone** — `hospitality-mcp` runs just our custom tools against either
+   bundled **mock** data or the Hospitable Public API directly.
+
+## The gateway
+
+```
+AI assistant ──stdio──▶  hospitable-gateway  ──HTTP──▶  Hospitable MCP (59 tools)
+                               │
+                               └─ custom tools ──Public API v2──▶ Hospitable
+```
+
+It needs two credentials (see **Security** below — never commit these):
+
+| Env var | What | Where in Hospitable |
+| --- | --- | --- |
+| `HOSPITABLE_MCP_TOKEN` | Bearer token, scope `mcp:use` | AI agents → Fallback bearer tokens |
+| `HOSPITABLE_ACCESS_TOKEN` | Personal Access Token (`pat:read/write`) — used by the custom tools | Settings → API access |
+
+```bash
+pip install -e .
+export HOSPITABLE_MCP_TOKEN=...      # mcp:use bearer
+export HOSPITABLE_ACCESS_TOKEN=...   # Public API PAT
+hospitable-gateway                   # stdio MCP server: 59 Hospitable tools + 2 custom
+```
+
+Add it to an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "hospitable": {
+      "command": "hospitable-gateway",
+      "env": {
+        "HOSPITABLE_MCP_TOKEN": "...",
+        "HOSPITABLE_ACCESS_TOKEN": "..."
+      }
+    }
+  }
+}
+```
+
+Then ask: *"Give me the daily turnover briefing for tomorrow."* (calls the
+custom tool), or use any native Hospitable tool like `get-reservations`,
+`get-tasks`, `get-property-calendar`, `send-reservation-message`, etc.
+
+### Custom tools added by the gateway
+
+| Tool | Purpose |
+| --- | --- |
+| `daily_turnover_briefing` | One briefing for a day across all properties: turnovers, same-day turnarounds, check-ins/outs, open issues (from reservation `issue_alert`), prioritized alerts. |
+| `list_turnovers` | Property turnovers for a day, priority-sorted, with notes. |
+
+> Sourcing note: the custom tools read live data via the **Public API v2** using
+> your PAT. Complaints come from Hospitable's native reservation `issue_alert`
+> (no extra calls). Cleaning **tasks** are available as native upstream tools
+> (`get-tasks` / `create-task`).
+
+## Standalone server (mock or direct API)
+
+The `hospitality-mcp` entry point runs the custom tools on their own and exposes
+a fuller toolset:
 
 The server exposes these tools:
 
@@ -105,13 +169,26 @@ and flag anything urgent."*
 
 ```
 src/hospitality_mcp/
-  server.py      FastMCP server + tool definitions
-  client.py      HospitalityClient interface + MockClient
+  gateway.py     Hospitable MCP gateway: proxy upstream tools + custom tools
+  server.py      standalone FastMCP server (custom tools, mock/hospitable)
+  briefing.py    composite views (daily_turnover_briefing, list_turnovers)
+  client.py      HospitalityClient interface + MockClient + shared turnover logic
+  hospitable.py  live Hospitable Public API v2 client (HospitalityClient)
   mock_data.py   in-memory dataset, generated relative to today
   models.py      dataclasses (Property, Reservation, Turnover, Complaint, ...)
   dates.py       flexible day parsing ("tomorrow", "+2", ISO, weekday)
-  hospitable.py  live Hospitable Public API v2 client (HospitalityClient)
 ```
+
+## Security
+
+This server takes long-lived Hospitable tokens. Treat them like passwords:
+
+- **Never commit them.** They belong in environment variables or a secrets
+  manager, not in the repo. `.gitignore` blocks common token/secret filenames.
+- Prefer the **least privilege** that works (e.g. a read-only PAT if you don't
+  need the write tools).
+- **Rotate** a token immediately if it is ever pasted into a chat, log, or
+  shared channel.
 
 ### Going live / adding another PMS
 

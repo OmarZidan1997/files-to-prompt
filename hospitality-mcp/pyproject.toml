@@ -15,6 +15,7 @@ test = ["pytest"]
 
 [project.scripts]
 hospitality-mcp = "hospitality_mcp.server:main"
+hospitable-gateway = "hospitality_mcp.gateway:main"
 
 [build-system]
 requires = ["hatchling"]

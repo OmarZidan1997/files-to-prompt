@@ -53,7 +53,7 @@ RESERVATIONS = {
             "guests": {"total": 2},
             "guest": {"id": "g-2", "first_name": "Jordan", "last_name": "Brooks"},
         },
-        {  # check-in only on DAY at prop-2
+        {  # check-in only on DAY at prop-2, with a native Hospitable issue alert
             "id": "res-in-2",
             "platform": "booking",
             "properties": [{"id": "prop-2"}],
@@ -61,6 +61,8 @@ RESERVATIONS = {
             "check_out": "2026-06-04T11:00:00Z",
             "status": {"current": "accepted"},
             "guests": {"total": 3},
+            "notes": "Repeat guest; prefers ground floor.",
+            "issue_alert": "Guest reported the heater is not working",
             "guest": {"id": "g-3", "first_name": "Wei", "last_name": "Chen"},
         },
     ],
@@ -110,9 +112,11 @@ def _handler(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def client():
-    # Large recency window so fixed message dates aren't filtered by wall clock.
+    # scan_messages on (off by default) so we exercise both complaint sources;
+    # large recency window so fixed message dates aren't filtered by wall clock.
     return HospitableClient(
         token="test-token",
+        scan_messages=True,
         message_recency_days=100_000,
         transport=httpx.MockTransport(_handler),
     )
@@ -158,14 +162,23 @@ def test_send_guest_message_posts(client):
     assert result["reservation_id"] == "res-in-1"
 
 
+def test_issue_alert_becomes_complaint(client):
+    # The native issue_alert on res-in-2 should surface as a complaint with no
+    # message scanning required.
+    issue = [c for c in client.complaints() if c.category == "issue"]
+    assert len(issue) == 1
+    assert issue[0].property_id == "prop-2"
+    assert "heater" in issue[0].description.lower()
+    assert issue[0].severity.value == "high"
+
+
 def test_complaints_derived_from_guest_messages(client):
-    complaints = client.complaints()
-    assert len(complaints) == 1  # only the guest AC message, not the host reply
-    c = complaints[0]
+    derived = [c for c in client.complaints() if "auto-detected" in c.description]
+    assert len(derived) == 1  # the guest AC message, not the host reply
+    c = derived[0]
     assert c.property_id == "prop-1"
     assert c.category == "maintenance"
     assert c.severity.value == "high"  # "not working" -> high
-    assert "auto-detected" in c.description
 
 
 def test_luggage_derived_from_guest_messages(client):
@@ -182,10 +195,12 @@ def test_derived_complaint_feeds_turnover_notes(client):
     assert t.priority == "high"
 
 
-def test_scanning_can_be_disabled(client):
-    no_scan = HospitableClient(
-        token="t", scan_messages=False, transport=httpx.MockTransport(_handler)
-    )
-    assert no_scan.complaints() == []
-    assert no_scan.luggage_holds() == []
+def test_message_scanning_off_by_default(client):
+    # Default client does NOT scan messages, but still reports native issue
+    # alerts (free) and no message-derived luggage holds.
+    no_scan = HospitableClient(token="t", transport=httpx.MockTransport(_handler))
+    complaints = no_scan.complaints()
+    assert all("auto-detected" not in c.description for c in complaints)
+    assert any(c.category == "issue" for c in complaints)  # issue_alert still works
+    assert no_scan.luggage_holds() == []  # luggage only comes from message scan
     assert client.cleaner_for("prop-1") is None

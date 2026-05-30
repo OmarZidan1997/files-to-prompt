@@ -7,3 +7,9 @@ dist/
 .pytest_cache/
 .venv/
 venv/
+
+# never commit credentials
+.env
+.env.*
+*token*
+*secret*

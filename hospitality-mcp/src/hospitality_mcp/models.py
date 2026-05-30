@@ -72,6 +72,7 @@ class Reservation:
     late_check_out: bool = False
     luggage_hold: bool = False
     notes: str = ""
+    issue_alert: Optional[str] = None  # Hospitable's native reservation issue flag
 
 
 @dataclass

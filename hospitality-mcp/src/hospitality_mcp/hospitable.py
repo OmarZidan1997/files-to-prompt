@@ -105,7 +105,7 @@ class HospitableClient(HospitalityClient):
         base_url: str = DEFAULT_BASE_URL,
         window_days: int = 21,
         timeout: float = 30.0,
-        scan_messages: bool = True,
+        scan_messages: bool = False,
         message_recency_days: int = 14,
         max_scan_reservations: int = 60,
         transport: Optional[httpx.BaseTransport] = None,
@@ -123,6 +123,7 @@ class HospitableClient(HospitalityClient):
             base_url=base,
             timeout=timeout,
             transport=transport,
+            follow_redirects=True,  # Hospitable's pagination links use http:// -> 307 https
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
@@ -134,21 +135,35 @@ class HospitableClient(HospitalityClient):
         self._reservation_windows: Dict[tuple, List[Reservation]] = {}
 
     # --- HTTP plumbing -----------------------------------------------------
-    def _get_collection(self, path: str, params: Optional[Dict[str, Any]] = None) -> List[dict]:
-        """GET a paginated collection, following ``links.next`` to the end."""
+    def _get_collection(
+        self, path: str, params: Optional[Dict[str, Any]] = None, *, max_pages: int = 50
+    ) -> List[dict]:
+        """GET a paginated collection by incrementing ``page``.
+
+        We page manually (rather than following ``links.next``) because
+        Hospitable's next-link drops required query params like ``properties[]``,
+        which 400s. Re-sending the original params each page is reliable.
+        """
         items: List[dict] = []
-        url: Optional[str] = path
-        while url:
-            resp = self._http.get(url, params=params)
+        query: Dict[str, Any] = dict(params or {})
+        for page in range(1, max_pages + 1):
+            query["page"] = page
+            resp = self._http.get(path, params=query)
             resp.raise_for_status()
             payload = resp.json()
             data = payload.get("data", payload)
-            if isinstance(data, list):
-                items.extend(data)
-            else:  # defensive: a single object where a list was expected
+            if not isinstance(data, list):  # single object where a list was expected
                 items.append(data)
-            url = (payload.get("links") or {}).get("next")
-            params = None  # the next link already carries the query string
+                break
+            items.extend(data)
+            meta = payload.get("meta") or {}
+            last_page = meta.get("last_page")
+            current = meta.get("current_page", page)
+            if last_page is not None:
+                if current >= last_page:
+                    break
+            elif not (payload.get("links") or {}).get("next"):
+                break
         return items
 
     def _get_one(self, path: str, params: Optional[Dict[str, Any]] = None) -> Optional[dict]:
@@ -254,6 +269,13 @@ class HospitableClient(HospitalityClient):
         else:
             party = guests
 
+        # Hospitable's own reservation note plus a party-size hint.
+        note_parts = []
+        if r.get("notes"):
+            note_parts.append(str(r["notes"]))
+        if party not in (None, 0):
+            note_parts.append(f"Party of {party}.")
+
         return Reservation(
             id=str(r.get("id", "")),
             property_id=self._property_id_of(r),
@@ -262,7 +284,8 @@ class HospitableClient(HospitalityClient):
             check_out=self._parse_date(r.get("check_out") or r.get("departure_date")),
             source=str(r.get("platform") or r.get("channel") or "unknown"),
             status=str(status or "confirmed"),
-            notes="" if party in (None, 0) else f"Party of {party}.",
+            notes=" ".join(note_parts),
+            issue_alert=(str(r["issue_alert"]) if r.get("issue_alert") else None),
         )
 
     # --- HospitalityClient interface ---------------------------------------
@@ -364,11 +387,27 @@ class HospitableClient(HospitalityClient):
             yield body, created
 
     def complaints(self, *, status: Optional[ComplaintStatus] = None) -> List[Complaint]:
-        # Derived from guest messages — Hospitable has no native complaint object.
-        if not self.scan_messages:
-            return []
+        # Primary source: Hospitable's native per-reservation ``issue_alert``
+        # (already present on loaded reservations — no extra API calls).
         found: List[Complaint] = []
         for res in self._scan_targets():
+            if res.issue_alert:
+                found.append(
+                    Complaint(
+                        id=f"alert-{res.id}",
+                        property_id=res.property_id,
+                        reservation_id=res.id,
+                        category="issue",
+                        severity=Severity.HIGH,
+                        description=f"Hospitable issue alert: {res.issue_alert}",
+                        status=ComplaintStatus.OPEN,
+                        created_on=res.check_in or date.today(),
+                    )
+                )
+
+        # Optional supplement: scan recent guest messages for complaint keywords
+        # (costs one API call per reservation, so it is off by default).
+        for res in self._scan_targets() if self.scan_messages else []:
             for body, created in self._guest_messages(res):
                 result = classify_complaint(body)
                 if result is None:
