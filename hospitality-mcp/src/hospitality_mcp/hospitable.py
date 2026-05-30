@@ -38,7 +38,63 @@ from .models import (
     Reservation,
 )
 
+from .models import Severity
+
 DEFAULT_BASE_URL = "https://public.api.hospitable.com/v2/"
+
+# Keyword heuristics for turning free-text guest messages into structured
+# complaints / luggage holds (Hospitable has no native objects for these).
+_URGENT_TERMS = ("refund", "emergency", "unacceptable", "flooded", "no water", "locked out")
+_HIGH_TERMS = (
+    "broken", "not working", "doesn't work", "no hot water", "leak", "leaking",
+    "no heat", "no power", "no electricity", "bed bugs", "roaches", "infestation",
+)
+# category -> trigger terms (first match wins)
+_COMPLAINT_CATEGORIES = {
+    "maintenance": (
+        "broken", "not working", "doesn't work", "leak", "leaking", "no hot water",
+        "no heat", "no power", "no electricity", "ac ", "air conditioning", "heater",
+        "toilet", "plumbing", "fix",
+    ),
+    "cleanliness": ("dirty", "not clean", "stained", "smell", "trash", "bugs", "roaches", "bed bugs"),
+    "connectivity": ("wifi", "wi-fi", "internet", "no signal"),
+    "noise": ("noise", "noisy", "loud", "party next"),
+    "access": ("locked out", "can't get in", "cannot get in", "code doesn't", "key", "lockbox"),
+}
+_COMPLAINT_TERMS = ("complaint", "unhappy", "disappointed", "issue", "problem", "not happy")
+_LUGGAGE_TERMS = ("luggage", "suitcase", "bags", "store my bag", "drop my bag", "drop off bag", "leave my bag")
+
+
+def _snippet(text: str, limit: int = 200) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def classify_complaint(text: str):
+    """Return (category, Severity) if the message reads like a complaint, else None."""
+    low = text.lower()
+    category = None
+    for cat, terms in _COMPLAINT_CATEGORIES.items():
+        if any(t in low for t in terms):
+            category = cat
+            break
+    if category is None and any(t in low for t in _COMPLAINT_TERMS):
+        category = "general"
+    if category is None:
+        return None
+    if any(t in low for t in _URGENT_TERMS):
+        severity = Severity.URGENT
+    elif any(t in low for t in _HIGH_TERMS):
+        severity = Severity.HIGH
+    elif category in ("general", "connectivity"):
+        severity = Severity.LOW
+    else:
+        severity = Severity.MEDIUM
+    return category, severity
+
+
+def mentions_luggage(text: str) -> bool:
+    return any(t in text.lower() for t in _LUGGAGE_TERMS)
 
 
 class HospitableClient(HospitalityClient):
@@ -49,6 +105,9 @@ class HospitableClient(HospitalityClient):
         base_url: str = DEFAULT_BASE_URL,
         window_days: int = 21,
         timeout: float = 30.0,
+        scan_messages: bool = True,
+        message_recency_days: int = 14,
+        max_scan_reservations: int = 60,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
         if not token:
@@ -56,6 +115,10 @@ class HospitableClient(HospitalityClient):
         # base_url must keep a trailing slash so relative paths join correctly.
         base = base_url if base_url.endswith("/") else base_url + "/"
         self.window_days = window_days
+        self.scan_messages = scan_messages
+        self.message_recency_days = message_recency_days
+        self.max_scan_reservations = max_scan_reservations
+        self._messages: Dict[str, List[dict]] = {}
         self._http = httpx.Client(
             base_url=base,
             timeout=timeout,
@@ -248,11 +311,111 @@ class HospitableClient(HospitalityClient):
     def check_outs_on(self, day: date) -> List[Reservation]:
         return [r for r in self._reservations_window(day) if r.check_out == day]
 
+    # --- guest-message scanning (derives complaints / luggage) -------------
+    def _scan_targets(self) -> List[Reservation]:
+        """Reservations to scan for messages: those in already-loaded windows,
+        or today's window if nothing has been loaded yet. Capped for safety."""
+        seen: Dict[str, Reservation] = {}
+        for window in self._reservation_windows.values():
+            for r in window:
+                if r.id:
+                    seen.setdefault(r.id, r)
+        if not seen:
+            for r in self._reservations_window(date.today()):
+                if r.id:
+                    seen.setdefault(r.id, r)
+        return list(seen.values())[: self.max_scan_reservations]
+
+    def _messages_for(self, reservation_id: str) -> List[dict]:
+        if reservation_id not in self._messages:
+            try:
+                self._messages[reservation_id] = self._get_collection(
+                    f"reservations/{reservation_id}/messages"
+                )
+            except httpx.HTTPError:
+                self._messages[reservation_id] = []
+        return self._messages[reservation_id]
+
+    @staticmethod
+    def _message_body(msg: dict) -> str:
+        return str(msg.get("body") or msg.get("message") or msg.get("text") or "")
+
+    @staticmethod
+    def _is_guest_message(msg: dict) -> bool:
+        role = str(
+            msg.get("sender_role") or msg.get("sender_type") or msg.get("sender") or ""
+        ).lower()
+        if not role:
+            return True  # unknown sender: don't drop a potential complaint
+        return "host" not in role and "user" not in role and "system" not in role
+
+    def _guest_messages(self, reservation: Reservation):
+        """Yield (body, created_on) for recent guest-sent messages."""
+        cutoff = date.today() - timedelta(days=self.message_recency_days)
+        for msg in self._messages_for(reservation.id):
+            if not self._is_guest_message(msg):
+                continue
+            body = self._message_body(msg)
+            if not body:
+                continue
+            created = self._parse_date(msg.get("created_at") or msg.get("sent_at")) or date.today()
+            if created < cutoff:
+                continue
+            yield body, created
+
     def complaints(self, *, status: Optional[ComplaintStatus] = None) -> List[Complaint]:
-        return []  # no native complaints concept in Hospitable
+        # Derived from guest messages — Hospitable has no native complaint object.
+        if not self.scan_messages:
+            return []
+        found: List[Complaint] = []
+        for res in self._scan_targets():
+            for body, created in self._guest_messages(res):
+                result = classify_complaint(body)
+                if result is None:
+                    continue
+                category, severity = result
+                found.append(
+                    Complaint(
+                        id=f"msg-{res.id}-{len(found)}",
+                        property_id=res.property_id,
+                        reservation_id=res.id,
+                        category=category,
+                        severity=severity,
+                        description=f"(auto-detected from guest message) {_snippet(body)}",
+                        status=ComplaintStatus.OPEN,
+                        created_on=created,
+                    )
+                )
+        if status is not None:
+            found = [c for c in found if c.status == status]
+        sev_order = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+        found.sort(key=lambda c: sev_order.get(c.severity.value, 4))
+        return found
 
     def luggage_holds(self, *, active_only: bool = True) -> List[LuggageHold]:
-        return []  # no native luggage concept in Hospitable
+        # Derived from guest messages — Hospitable has no native luggage object.
+        if not self.scan_messages:
+            return []
+        holds: List[LuggageHold] = []
+        for res in self._scan_targets():
+            guest = self.get_guest(res.guest_id)
+            for body, _created in self._guest_messages(res):
+                if not mentions_luggage(body):
+                    continue
+                holds.append(
+                    LuggageHold(
+                        id=f"msg-{res.id}-{len(holds)}",
+                        property_id=res.property_id,
+                        reservation_id=res.id,
+                        guest_name=guest.name if guest else res.guest_id,
+                        bags=0,  # not parseable from free text
+                        drop_time="",
+                        pickup_time="",
+                        status="stored",
+                        note=f"(auto-detected from guest message) {_snippet(body)}",
+                    )
+                )
+        return holds
 
     def add_note(self, reservation_id: str, note: str) -> Reservation:
         raise NotImplementedError(

@@ -75,7 +75,12 @@ What maps to Hospitable, and what doesn't:
 | Properties, reservations, guests | `GET /properties`, `GET /reservations` (`include=guest,properties`) |
 | Turnovers / same-day turnarounds | **Derived** from real check-in / check-out dates |
 | Send guest message | `POST /reservations/{id}/messages` |
-| Cleaners, complaints, luggage holds | **Not in the Hospitable API** — return empty for now |
+| Complaints, luggage holds | **Derived** by scanning recent guest messages (`GET /reservations/{id}/messages`) for keywords — approximate, flagged `(auto-detected …)` |
+| Cleaners | **Not in the Hospitable API** — empty |
+
+Message scanning is on by default and tunable on `HospitableClient`
+(`scan_messages`, `message_recency_days`, `max_scan_reservations`). Detected
+complaints also feed into each turnover's notes and priority.
 
 ### Use it from a client (e.g. Claude Code / Claude Desktop)
 

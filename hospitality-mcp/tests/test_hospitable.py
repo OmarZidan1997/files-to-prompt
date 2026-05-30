@@ -68,20 +68,54 @@ RESERVATIONS = {
 }
 
 
+MESSAGES = {
+    "res-out-1": {
+        "data": [
+            {
+                "id": "m1",
+                "sender_role": "guest",
+                "body": "Hi, the AC is not working and the bedroom is very hot.",
+                "created_at": "2026-05-29T10:00:00Z",
+            },
+            {
+                "id": "m2",
+                "sender_role": "host",
+                "body": "So sorry! Sending someone to fix the air conditioning today.",
+                "created_at": "2026-05-29T10:05:00Z",
+            },
+            {
+                "id": "m3",
+                "sender_role": "guest",
+                "body": "Also, can I store my luggage after checkout until 5pm?",
+                "created_at": "2026-05-29T10:10:00Z",
+            },
+        ]
+    }
+}
+
+
 def _handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path.endswith("/properties"):
         return httpx.Response(200, json=PROPERTIES)
+    if path.endswith("/messages") and request.method == "POST":
+        return httpx.Response(201, json={"data": {"id": "msg-new"}})
+    if path.endswith("/messages"):
+        res_id = path.split("/reservations/")[1].split("/")[0]
+        return httpx.Response(200, json=MESSAGES.get(res_id, {"data": []}))
     if path.endswith("/reservations"):
         return httpx.Response(200, json=RESERVATIONS)
-    if path.endswith("/messages") and request.method == "POST":
-        return httpx.Response(201, json={"data": {"id": "msg-1"}})
     return httpx.Response(404, json={"message": f"unhandled {path}"})
 
 
 @pytest.fixture
 def client():
-    return HospitableClient(token="test-token", transport=httpx.MockTransport(_handler))
+    # Large recency window so fixed message dates aren't filtered by wall clock.
+    return HospitableClient(
+        token="test-token",
+        message_recency_days=100_000,
+        transport=httpx.MockTransport(_handler),
+    )
 
 
 def test_properties_mapped(client):
@@ -124,7 +158,34 @@ def test_send_guest_message_posts(client):
     assert result["reservation_id"] == "res-in-1"
 
 
-def test_no_native_complaints_or_luggage(client):
-    assert client.complaints() == []
-    assert client.luggage_holds() == []
+def test_complaints_derived_from_guest_messages(client):
+    complaints = client.complaints()
+    assert len(complaints) == 1  # only the guest AC message, not the host reply
+    c = complaints[0]
+    assert c.property_id == "prop-1"
+    assert c.category == "maintenance"
+    assert c.severity.value == "high"  # "not working" -> high
+    assert "auto-detected" in c.description
+
+
+def test_luggage_derived_from_guest_messages(client):
+    holds = client.luggage_holds()
+    assert len(holds) == 1
+    assert holds[0].property_id == "prop-1"
+    assert "luggage" in holds[0].note.lower()
+
+
+def test_derived_complaint_feeds_turnover_notes(client):
+    # The AC complaint at prop-1 should surface in tomorrow's turnover notes.
+    t = next(t for t in client.turnovers_on(DAY) if t.property_id == "prop-1")
+    assert any("auto-detected" in n for n in t.notes)
+    assert t.priority == "high"
+
+
+def test_scanning_can_be_disabled(client):
+    no_scan = HospitableClient(
+        token="t", scan_messages=False, transport=httpx.MockTransport(_handler)
+    )
+    assert no_scan.complaints() == []
+    assert no_scan.luggage_holds() == []
     assert client.cleaner_for("prop-1") is None

@@ -96,6 +96,7 @@ class LuggageHold:
     drop_time: str
     pickup_time: str
     status: str = "stored"  # stored, picked_up
+    note: str = ""
 
 
 @dataclass
