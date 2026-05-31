@@ -13,3 +13,6 @@ venv/
 .env.*
 *token*
 *secret*
+
+# generated briefings contain guest PII - keep out of git
+turnover_*.md
