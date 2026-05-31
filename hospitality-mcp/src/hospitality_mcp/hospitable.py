@@ -44,25 +44,40 @@ DEFAULT_BASE_URL = "https://public.api.hospitable.com/v2/"
 
 # Keyword heuristics for turning free-text guest messages into structured
 # complaints / luggage holds (Hospitable has no native objects for these).
+# Kept deliberately specific to avoid flagging routine check-out chatter.
 _URGENT_TERMS = ("refund", "emergency", "unacceptable", "flooded", "no water", "locked out")
 _HIGH_TERMS = (
-    "broken", "not working", "doesn't work", "no hot water", "leak", "leaking",
-    "no heat", "no power", "no electricity", "bed bugs", "roaches", "infestation",
+    "broken", "not working", "doesn't work", "does not work", "no hot water", "leak",
+    "leaking", "no heat", "no power", "no electricity", "bed bugs", "roaches", "infestation",
 )
 # category -> trigger terms (first match wins)
 _COMPLAINT_CATEGORIES = {
     "maintenance": (
-        "broken", "not working", "doesn't work", "leak", "leaking", "no hot water",
-        "no heat", "no power", "no electricity", "ac ", "air conditioning", "heater",
-        "toilet", "plumbing", "fix",
+        "broken", "not working", "doesn't work", "does not work", "leak", "leaking",
+        "no hot water", "no heat", "no power", "no electricity", "no air con",
+        "air conditioning", "heater not", "heating not", "toilet", "plumbing",
+        "light bulb", "bulbs", "doesn't lock", "won't lock",
     ),
-    "cleanliness": ("dirty", "not clean", "stained", "smell", "trash", "bugs", "roaches", "bed bugs"),
-    "connectivity": ("wifi", "wi-fi", "internet", "no signal"),
-    "noise": ("noise", "noisy", "loud", "party next"),
-    "access": ("locked out", "can't get in", "cannot get in", "code doesn't", "key", "lockbox"),
+    "cleanliness": (
+        "dirty", "not clean", "isn't clean", "stained", "filthy", "smell", "smelled",
+        "sticky", "bugs", "roaches", "bed bugs", "disgusting",
+    ),
+    "connectivity": ("wifi", "wi-fi", "internet not", "no internet", "no signal", "no wifi"),
+    "noise": ("too noisy", "very loud", "party next", "loud music"),
+    "access": (
+        "locked out", "can't get in", "cannot get in", "can't enter", "cannot enter",
+        "door won't close", "door wont close", "won't close", "can't exit", "cant exit",
+    ),
 }
-_COMPLAINT_TERMS = ("complaint", "unhappy", "disappointed", "issue", "problem", "not happy")
-_LUGGAGE_TERMS = ("luggage", "suitcase", "bags", "store my bag", "drop my bag", "drop off bag", "leave my bag")
+_COMPLAINT_TERMS = (
+    "complaint", "unhappy", "disappointed", "not happy", "awful", "terrible", "deception",
+)
+_LUGGAGE_TERMS = (
+    "luggage", "suitcase", "suitcases", "store my bag", "store our bag", "drop my bag",
+    "drop our bag", "drop off bag", "drop off our", "drop bags", "leave my bag",
+    "leave our bag", "leave the bag", "leave our suitcase", "store the bag", "bag drop",
+    "drop off luggage", "store luggage", "leave our luggage", "leave my luggage",
+)
 
 
 def _snippet(text: str, limit: int = 200) -> str:
@@ -97,6 +112,9 @@ def mentions_luggage(text: str) -> bool:
     return any(t in text.lower() for t in _LUGGAGE_TERMS)
 
 
+_SEV_RANK = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+
+
 class HospitableClient(HospitalityClient):
     def __init__(
         self,
@@ -105,8 +123,8 @@ class HospitableClient(HospitalityClient):
         base_url: str = DEFAULT_BASE_URL,
         window_days: int = 21,
         timeout: float = 30.0,
-        scan_messages: bool = False,
-        message_recency_days: int = 14,
+        scan_messages: bool = True,
+        message_recency_days: int = 365,
         max_scan_reservations: int = 60,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
@@ -372,11 +390,22 @@ class HospitableClient(HospitalityClient):
             return True  # unknown sender: don't drop a potential complaint
         return "host" not in role and "user" not in role and "system" not in role
 
+    # Hospitable message ``source`` values that are NOT genuine human dialog.
+    _AUTOMATED_SOURCES = {"ai", "automated", "hospitable", "system", "bot"}
+
+    @classmethod
+    def _is_genuine_message(cls, msg: dict) -> bool:
+        """True only for real human-typed messages (source == 'platform'),
+        excluding AI auto-replies, automated templates and system messages."""
+        source = str(msg.get("source") or "").lower()
+        return source not in cls._AUTOMATED_SOURCES
+
     def _guest_messages(self, reservation: Reservation):
-        """Yield (body, created_on) for recent guest-sent messages."""
+        """Yield (body, created_on) for recent, genuine, guest-sent messages —
+        ignoring AI/automated/system messages."""
         cutoff = date.today() - timedelta(days=self.message_recency_days)
         for msg in self._messages_for(reservation.id):
-            if not self._is_guest_message(msg):
+            if not self._is_guest_message(msg) or not self._is_genuine_message(msg):
                 continue
             body = self._message_body(msg)
             if not body:
@@ -386,64 +415,63 @@ class HospitableClient(HospitalityClient):
                 continue
             yield body, created
 
-    def complaints(self, *, status: Optional[ComplaintStatus] = None) -> List[Complaint]:
-        # Primary source: Hospitable's native per-reservation ``issue_alert``
-        # (already present on loaded reservations — no extra API calls).
-        found: List[Complaint] = []
-        for res in self._scan_targets():
-            if res.issue_alert:
-                found.append(
-                    Complaint(
-                        id=f"alert-{res.id}",
-                        property_id=res.property_id,
-                        reservation_id=res.id,
-                        category="issue",
-                        severity=Severity.HIGH,
-                        description=f"Hospitable issue alert: {res.issue_alert}",
-                        status=ComplaintStatus.OPEN,
-                        created_on=res.check_in or date.today(),
-                    )
-                )
+    def _reservations_by_ids(self, reservation_ids) -> List[Reservation]:
+        wanted = {rid for rid in reservation_ids if rid}
+        out: List[Reservation] = []
+        seen: set = set()
+        for window in self._reservation_windows.values():
+            for r in window:
+                if r.id in wanted and r.id not in seen:
+                    seen.add(r.id)
+                    out.append(r)
+        return out
 
-        # Optional supplement: scan recent guest messages for complaint keywords
-        # (costs one API call per reservation, so it is off by default).
-        for res in self._scan_targets() if self.scan_messages else []:
+    def _complaints_for(self, reservations) -> List[Complaint]:
+        """At most one complaint per reservation — the most severe genuine
+        guest message that reads like a complaint."""
+        if not self.scan_messages:
+            return []
+        found: List[Complaint] = []
+        for res in reservations:
+            best = None  # (rank, category, severity, body, created)
             for body, created in self._guest_messages(res):
                 result = classify_complaint(body)
                 if result is None:
                     continue
                 category, severity = result
+                rank = _SEV_RANK[severity.value]
+                if best is None or rank < best[0]:
+                    best = (rank, category, severity, body, created)
+            if best is not None:
+                _, category, severity, body, created = best
                 found.append(
                     Complaint(
-                        id=f"msg-{res.id}-{len(found)}",
+                        id=f"msg-{res.id}",
                         property_id=res.property_id,
                         reservation_id=res.id,
                         category=category,
                         severity=severity,
-                        description=f"(auto-detected from guest message) {_snippet(body)}",
+                        description=f"(from guest message) {_snippet(body)}",
                         status=ComplaintStatus.OPEN,
                         created_on=created,
                     )
                 )
-        if status is not None:
-            found = [c for c in found if c.status == status]
-        sev_order = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
-        found.sort(key=lambda c: sev_order.get(c.severity.value, 4))
+        found.sort(key=lambda c: _SEV_RANK[c.severity.value])
         return found
 
-    def luggage_holds(self, *, active_only: bool = True) -> List[LuggageHold]:
-        # Derived from guest messages — Hospitable has no native luggage object.
+    def _luggage_for(self, reservations) -> List[LuggageHold]:
+        """At most one luggage hold per reservation."""
         if not self.scan_messages:
             return []
         holds: List[LuggageHold] = []
-        for res in self._scan_targets():
-            guest = self.get_guest(res.guest_id)
+        for res in reservations:
             for body, _created in self._guest_messages(res):
                 if not mentions_luggage(body):
                     continue
+                guest = self.get_guest(res.guest_id)
                 holds.append(
                     LuggageHold(
-                        id=f"msg-{res.id}-{len(holds)}",
+                        id=f"msg-{res.id}",
                         property_id=res.property_id,
                         reservation_id=res.id,
                         guest_name=guest.name if guest else res.guest_id,
@@ -451,10 +479,44 @@ class HospitableClient(HospitalityClient):
                         drop_time="",
                         pickup_time="",
                         status="stored",
-                        note=f"(auto-detected from guest message) {_snippet(body)}",
+                        note=f"(from guest message) {_snippet(body)}",
                     )
                 )
+                break  # one per reservation
         return holds
+
+    def complaints(self, *, status: Optional[ComplaintStatus] = None) -> List[Complaint]:
+        # Account-wide: scans every reservation in the loaded window(s).
+        found = self._complaints_for(self._scan_targets())
+        if status is not None:
+            found = [c for c in found if c.status == status]
+        return found
+
+    def luggage_holds(self, *, active_only: bool = True) -> List[LuggageHold]:
+        return self._luggage_for(self._scan_targets())
+
+    # Day-scoped variants used by the briefing: only the reservations actually
+    # involved in that day's turnovers, so the output stays focused.
+    def day_complaints(self, reservation_ids) -> List[Complaint]:
+        return self._complaints_for(self._reservations_by_ids(reservation_ids))
+
+    def day_luggage(self, reservation_ids) -> List[LuggageHold]:
+        return self._luggage_for(self._reservations_by_ids(reservation_ids))
+
+    def guest_conversation_for(self, reservation_ids, max_messages: int = 100):
+        """reservation_id -> the FULL genuine guest thread (chronological).
+
+        Returns every genuine guest message for the reservation (not just the
+        latest), so the whole conversation can be analysed for requests,
+        concerns and anything to be aware of. AI/automated/system and host
+        messages are excluded."""
+        out: Dict[str, List[str]] = {}
+        for res in self._reservations_by_ids(reservation_ids):
+            msgs = sorted(self._guest_messages(res), key=lambda bc: bc[1])  # oldest -> newest
+            texts = [_snippet(body, 400) for body, _ in msgs[-max_messages:]]
+            if texts:
+                out[res.id] = texts
+        return out
 
     def add_note(self, reservation_id: str, note: str) -> Reservation:
         raise NotImplementedError(

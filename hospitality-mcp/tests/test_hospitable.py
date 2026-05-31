@@ -73,23 +73,40 @@ RESERVATIONS = {
 MESSAGES = {
     "res-out-1": {
         "data": [
-            {
+            {  # genuine guest dialog -> a complaint
                 "id": "m1",
-                "sender_role": "guest",
+                "sender_type": "guest",
+                "source": "platform",
                 "body": "Hi, the AC is not working and the bedroom is very hot.",
                 "created_at": "2026-05-29T10:00:00Z",
             },
-            {
+            {  # genuine host reply -> not a guest message, ignored
                 "id": "m2",
-                "sender_role": "host",
+                "sender_type": "host",
+                "source": "platform",
                 "body": "So sorry! Sending someone to fix the air conditioning today.",
                 "created_at": "2026-05-29T10:05:00Z",
             },
-            {
+            {  # genuine guest dialog -> a luggage hold
                 "id": "m3",
-                "sender_role": "guest",
+                "sender_type": "guest",
+                "source": "platform",
                 "body": "Also, can I store my luggage after checkout until 5pm?",
                 "created_at": "2026-05-29T10:10:00Z",
+            },
+            {  # AUTOMATED guest-channel message with a complaint keyword -> MUST be ignored
+                "id": "m4",
+                "sender_type": "guest",
+                "source": "automated",
+                "body": "Reminder: the heater is not working schedule has changed.",
+                "created_at": "2026-05-29T10:20:00Z",
+            },
+            {  # AI auto-reply -> MUST be ignored
+                "id": "m5",
+                "sender_type": "host",
+                "source": "AI",
+                "body": "No worries, the wifi is broken issue will be resolved.",
+                "created_at": "2026-05-29T10:25:00Z",
             },
         ]
     }
@@ -112,11 +129,10 @@ def _handler(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def client():
-    # scan_messages on (off by default) so we exercise both complaint sources;
-    # large recency window so fixed message dates aren't filtered by wall clock.
+    # Message scanning is on by default; large recency window so fixed message
+    # dates aren't filtered by the wall clock.
     return HospitableClient(
         token="test-token",
-        scan_messages=True,
         message_recency_days=100_000,
         transport=httpx.MockTransport(_handler),
     )
@@ -162,23 +178,22 @@ def test_send_guest_message_posts(client):
     assert result["reservation_id"] == "res-in-1"
 
 
-def test_issue_alert_becomes_complaint(client):
-    # The native issue_alert on res-in-2 should surface as a complaint with no
-    # message scanning required.
-    issue = [c for c in client.complaints() if c.category == "issue"]
-    assert len(issue) == 1
-    assert issue[0].property_id == "prop-2"
-    assert "heater" in issue[0].description.lower()
-    assert issue[0].severity.value == "high"
+def test_issue_alert_is_not_a_complaint(client):
+    # The native issue_alert is intentionally NOT used as a complaint source.
+    assert all(c.category != "issue" for c in client.complaints())
+    assert all("issue alert" not in c.description.lower() for c in client.complaints())
 
 
-def test_complaints_derived_from_guest_messages(client):
-    derived = [c for c in client.complaints() if "auto-detected" in c.description]
-    assert len(derived) == 1  # the guest AC message, not the host reply
-    c = derived[0]
+def test_complaints_only_from_genuine_guest_dialog(client):
+    complaints = client.complaints()
+    # Exactly one: the genuine guest AC message. The host reply, the automated
+    # "heater not working" reminder, and the AI "wifi broken" message are ignored.
+    assert len(complaints) == 1
+    c = complaints[0]
     assert c.property_id == "prop-1"
     assert c.category == "maintenance"
     assert c.severity.value == "high"  # "not working" -> high
+    assert "from guest message" in c.description
 
 
 def test_luggage_derived_from_guest_messages(client):
@@ -191,16 +206,21 @@ def test_luggage_derived_from_guest_messages(client):
 def test_derived_complaint_feeds_turnover_notes(client):
     # The AC complaint at prop-1 should surface in tomorrow's turnover notes.
     t = next(t for t in client.turnovers_on(DAY) if t.property_id == "prop-1")
-    assert any("auto-detected" in n for n in t.notes)
+    assert any("from guest message" in n for n in t.notes)
     assert t.priority == "high"
 
 
-def test_message_scanning_off_by_default(client):
-    # Default client does NOT scan messages, but still reports native issue
-    # alerts (free) and no message-derived luggage holds.
-    no_scan = HospitableClient(token="t", transport=httpx.MockTransport(_handler))
-    complaints = no_scan.complaints()
-    assert all("auto-detected" not in c.description for c in complaints)
-    assert any(c.category == "issue" for c in complaints)  # issue_alert still works
-    assert no_scan.luggage_holds() == []  # luggage only comes from message scan
-    assert client.cleaner_for("prop-1") is None
+def test_scanning_can_be_disabled():
+    no_scan = HospitableClient(
+        token="t", scan_messages=False, transport=httpx.MockTransport(_handler)
+    )
+    assert no_scan.complaints() == []
+    assert no_scan.luggage_holds() == []
+    assert no_scan.cleaner_for("prop-1") is None
+
+
+def test_automated_messages_are_ignored(client):
+    # Neither the automated reminder nor the AI reply should produce complaints.
+    descriptions = " ".join(c.description.lower() for c in client.complaints())
+    assert "heater" not in descriptions  # from the automated message
+    assert "wifi" not in descriptions  # from the AI message

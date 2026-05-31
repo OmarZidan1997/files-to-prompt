@@ -64,13 +64,16 @@ custom tool), or use any native Hospitable tool like `get-reservations`,
 
 | Tool | Purpose |
 | --- | --- |
-| `daily_turnover_briefing` | One briefing for a day across all properties: turnovers, same-day turnarounds, check-ins/outs, open issues (from reservation `issue_alert`), prioritized alerts. |
+| `daily_turnover_briefing` | One briefing for a day across all properties: turnovers, same-day turnarounds, check-ins/outs, complaints + luggage derived from genuine guest messages, prioritized alerts, and the **full genuine guest conversation** for each turnover reservation (`guest_conversations`) so the whole dialog can be analysed. |
 | `list_turnovers` | Property turnovers for a day, priority-sorted, with notes. |
 
 > Sourcing note: the custom tools read live data via the **Public API v2** using
-> your PAT. Complaints come from Hospitable's native reservation `issue_alert`
-> (no extra calls). Cleaning **tasks** are available as native upstream tools
-> (`get-tasks` / `create-task`).
+> your PAT. Complaints, luggage holds and "things to be aware of" are derived
+> from **genuine guest message dialog** only — AI auto-replies, automated
+> templates and system messages (`source` of `AI` / `automated` / `hospitable`)
+> are ignored. Scanning is scoped to the reservations turning over that day and
+> deduped to one item per guest. Cleaning **tasks** are available as native
+> upstream tools (`get-tasks` / `create-task`).
 
 ## Standalone server (mock or direct API)
 

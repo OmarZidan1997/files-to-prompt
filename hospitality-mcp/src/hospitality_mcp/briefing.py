@@ -29,10 +29,42 @@ def daily_briefing(client: HospitalityClient, day: str = "tomorrow") -> Dict[str
     turnovers = client.turnovers_on(d)
     check_ins = client.check_ins_on(d)
     check_outs = client.check_outs_on(d)
+
+    # Scope complaints / luggage to just the reservations turning over today,
+    # so the briefing reflects this day rather than the whole account.
+    day_res_ids = {r.id for r in check_ins} | {r.id for r in check_outs}
     open_complaints = [
-        c for c in client.complaints() if c.status != ComplaintStatus.RESOLVED
+        c for c in client.day_complaints(day_res_ids) if c.status != ComplaintStatus.RESOLVED
     ]
-    luggage = client.luggage_holds(active_only=True)
+    luggage = client.day_luggage(day_res_ids)
+
+    # Full genuine guest conversations for each turnover reservation, so the
+    # whole dialog (not just the latest message) can be analysed for requests
+    # and anything to be aware of. Kept in a dedicated section; turnovers get a
+    # pointer so their notes stay readable.
+    conversations: List[Dict[str, Any]] = []
+    if hasattr(client, "guest_conversation_for"):
+        convo_map = client.guest_conversation_for(day_res_ids)
+        for t in turnovers:
+            for rid, role in (
+                (t.check_out_reservation_id, "departing"),
+                (t.check_in_reservation_id, "arriving"),
+            ):
+                messages = convo_map.get(rid)
+                if messages:
+                    conversations.append(
+                        {
+                            "property": t.property_name,
+                            "role": role,
+                            "reservation_id": rid,
+                            "message_count": len(messages),
+                            "messages": messages,
+                        }
+                    )
+                    t.notes.append(
+                        f"{role.capitalize()} guest: {len(messages)} genuine "
+                        f"message(s) — full thread in guest_conversations"
+                    )
 
     alerts: List[str] = []
     for t in turnovers:
@@ -65,6 +97,7 @@ def daily_briefing(client: HospitalityClient, day: str = "tomorrow") -> Dict[str
             "check_outs": check_outs,
             "open_complaints": open_complaints,
             "luggage_holds": luggage,
+            "guest_conversations": conversations,
         }
     )
 

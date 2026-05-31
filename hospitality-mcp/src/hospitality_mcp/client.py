@@ -65,6 +65,16 @@ class HospitalityClient(abc.ABC):
         prop = self.get_property(property_id)
         return prop.name if prop else property_id
 
+    def day_complaints(self, reservation_ids) -> List[Complaint]:
+        """Complaints relevant to a set of reservations. Default ignores the
+        scoping and returns all complaints; backends that derive complaints from
+        per-reservation data (e.g. messages) override this to stay focused."""
+        return self.complaints()
+
+    def day_luggage(self, reservation_ids) -> List[LuggageHold]:
+        """Luggage holds relevant to a set of reservations (see day_complaints)."""
+        return self.luggage_holds(active_only=True)
+
     def turnovers_on(self, day: date) -> List[Turnover]:
         """Derive turnovers from check-ins and check-outs on ``day``.
 
@@ -76,8 +86,11 @@ class HospitalityClient(abc.ABC):
         check_outs = {r.property_id: r for r in self.check_outs_on(day)}
         check_ins = {r.property_id: r for r in self.check_ins_on(day)}
         property_ids = sorted(set(check_outs) | set(check_ins))
+
+        # Complaints scoped to just the reservations turning over today.
+        day_res_ids = {r.id for r in check_outs.values()} | {r.id for r in check_ins.values()}
         open_complaints = [
-            c for c in self.complaints() if c.status != ComplaintStatus.RESOLVED
+            c for c in self.day_complaints(day_res_ids) if c.status != ComplaintStatus.RESOLVED
         ]
 
         turnovers: List[Turnover] = []
