@@ -346,11 +346,34 @@ class HospitableClient(HospitalityClient):
             self._reservation_windows[key] = [self._map_reservation(r) for r in raw]
         return self._reservation_windows[key]
 
+    # Reservation statuses that mean the stay is not actually happening, so it
+    # must not count as a check-in/check-out (and thus not as a turnover).
+    _INACTIVE_STATUSES = {
+        "cancelled",
+        "canceled",
+        "declined",
+        "denied",
+        "expired",
+        "rejected",
+    }
+
+    @classmethod
+    def _is_active(cls, reservation: Reservation) -> bool:
+        return reservation.status.strip().lower() not in cls._INACTIVE_STATUSES
+
     def check_ins_on(self, day: date) -> List[Reservation]:
-        return [r for r in self._reservations_window(day) if r.check_in == day]
+        return [
+            r
+            for r in self._reservations_window(day)
+            if r.check_in == day and self._is_active(r)
+        ]
 
     def check_outs_on(self, day: date) -> List[Reservation]:
-        return [r for r in self._reservations_window(day) if r.check_out == day]
+        return [
+            r
+            for r in self._reservations_window(day)
+            if r.check_out == day and self._is_active(r)
+        ]
 
     # --- guest-message scanning (derives complaints / luggage) -------------
     def _scan_targets(self) -> List[Reservation]:

@@ -65,6 +65,17 @@ RESERVATIONS = {
             "issue_alert": "Guest reported the heater is not working",
             "guest": {"id": "g-3", "first_name": "Wei", "last_name": "Chen"},
         },
+        {  # CANCELLED checkout on DAY at prop-2 -> must NOT count as a check-out,
+           # and must NOT make prop-2 a phantom same-day turnaround.
+            "id": "res-out-2-cancelled",
+            "platform": "airbnb",
+            "properties": [{"id": "prop-2"}],
+            "check_in": "2026-05-30T16:00:00Z",
+            "check_out": "2026-06-01T11:00:00Z",
+            "status": {"current": "cancelled"},
+            "guests": {"total": 2},
+            "guest": {"id": "g-4", "first_name": "Sam", "last_name": "Doe"},
+        },
     ],
     "links": {"next": None},
 }
@@ -148,6 +159,16 @@ def test_properties_mapped(client):
 def test_check_ins_and_outs(client):
     assert {r.property_id for r in client.check_ins_on(DAY)} == {"prop-1", "prop-2"}
     assert {r.property_id for r in client.check_outs_on(DAY)} == {"prop-1"}
+
+
+def test_cancelled_reservations_are_excluded(client):
+    # A cancelled checkout must not appear as a check-out...
+    out_ids = {r.id for r in client.check_outs_on(DAY)}
+    assert "res-out-2-cancelled" not in out_ids
+    assert {r.property_id for r in client.check_outs_on(DAY)} == {"prop-1"}
+    # ...and must not turn prop-2 into a phantom same-day turnaround.
+    turnovers = {t.property_id: t for t in client.turnovers_on(DAY)}
+    assert turnovers["prop-2"].same_day_turnaround is False
 
 
 def test_turnover_derivation_over_live_shape(client):
