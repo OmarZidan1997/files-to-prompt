@@ -1,0 +1,41 @@
+# Render Blueprint — deploys the staff turnover chatbot as a Docker web service.
+#
+# One-time setup (see README "Deploy to Render"):
+#   1. Push this repo to GitHub.
+#   2. Render Dashboard → New → Blueprint → pick the repo. Render reads this file.
+#   3. Fill in the secret env vars (marked sync:false) with the SAME values from
+#      your local .env. Deploy.
+#
+# Render terminates HTTPS for you and gives a free <name>.onrender.com subdomain,
+# so the app is reachable securely (and the copy-to-clipboard works).
+services:
+  - type: web
+    name: turnover-chatbot
+    runtime: docker
+    plan: starter            # has a persistent disk; "free" plan does NOT.
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/me  # cheap authed-or-not JSON, always 200
+    disk:
+      name: data
+      mountPath: /data        # CONVERSATIONS_FILE lives here so chats survive deploys
+      sizeGB: 1
+    envVars:
+      # Where the master conversations JSON is persisted (on the mounted disk).
+      - key: CONVERSATIONS_FILE
+        value: /data/conversations.json
+      # Send the session cookie only over HTTPS in production.
+      - key: COOKIE_SECURE
+        value: "true"
+      # Sign the session cookie. Generated once by Render and kept stable so
+      # logins survive restarts.
+      - key: SESSION_SECRET
+        generateValue: true
+      # --- Secrets: set these in the Render dashboard (same values as local .env) ---
+      - key: HOSPITABLE_ACCESS_TOKEN
+        sync: false
+      - key: HOSPITABLE_MCP_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false

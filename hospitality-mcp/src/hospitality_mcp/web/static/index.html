@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Turnover Briefing</title>
+<style>
+  :root { --bg:#0f1216; --panel:#181d24; --line:#2a313b; --txt:#e8edf2; --muted:#9aa6b2; --accent:#3a7afe; --accent2:#1f6f4a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--txt); height:100vh; }
+  .hidden { display:none !important; }
+
+  /* Login */
+  #login { height:100vh; display:flex; align-items:center; justify-content:center; }
+  #login form { background:var(--panel); border:1px solid var(--line); padding:32px; border-radius:12px; width:320px; }
+  #login h1 { font-size:18px; margin:0 0 4px; }
+  #login p { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  input[type=password], textarea, input[type=text] { width:100%; background:#0c0f13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px; font-size:14px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 14px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #loginErr { color:#ff7a7a; font-size:13px; margin-top:10px; min-height:16px; }
+
+  /* Chat */
+  #chat { height:100vh; display:flex; }
+  #sidebar { width:260px; flex:0 0 260px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden; }
+  #newChat { margin:12px; }
+  #convoList { flex:1; overflow-y:auto; }
+  .convo { display:flex; align-items:center; gap:6px; padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; font-size:13px; }
+  .convo:hover { background:#0c0f13; }
+  .convo.active { background:#0c0f13; border-left:3px solid var(--accent); }
+  .convo .t { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .convo .del { background:transparent; color:var(--muted); border:0; cursor:pointer; font-size:13px; padding:2px 4px; }
+  .convo .del:hover { color:#ff7a7a; }
+  #main { flex:1; min-width:0; display:flex; flex-direction:column; max-width:880px; margin:0 auto; width:100%; }
+  #menuBtn { display:none; background:transparent; color:var(--muted); border:1px solid var(--line); font-size:15px; padding:5px 10px; }
+  @media (max-width:720px) {
+    #sidebar { position:fixed; z-index:20; top:0; bottom:0; left:0; transform:translateX(-100%); transition:transform .2s; }
+    #sidebar.open { transform:translateX(0); box-shadow:0 0 30px rgba(0,0,0,.6); }
+    #menuBtn { display:inline-block; }
+  }
+  header { display:flex; align-items:center; gap:10px; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  header button { background:transparent; color:var(--muted); border:1px solid var(--line); font-size:12px; padding:6px 10px; }
+  #messages { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:14px; }
+  .msg { padding:12px 14px; border-radius:10px; max-width:90%; white-space:pre-wrap; line-height:1.5; font-size:14px; }
+  .msg.user { background:var(--accent); color:#fff; align-self:flex-end; }
+  .msg.bot { background:var(--panel); border:1px solid var(--line); align-self:flex-start; width:100%; max-width:100%; }
+  .msg.bot h3 { margin:12px 0 4px; font-size:15px; }
+  .msg.bot strong { color:#fff; }
+  .msg.bot ul { margin:6px 0; padding-left:20px; }
+  .msg.bot table { border-collapse:collapse; margin:10px 0; font-size:13px; width:100%; }
+  .msg.bot th, .msg.bot td { border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top; }
+  .msg.bot th { background:#0c0f13; color:#fff; }
+  .empty { color:var(--muted); text-align:center; margin:auto; font-size:14px; }
+  .wa-copy { margin-top:10px; background:var(--accent2); color:#fff; border:0; border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; }
+  .wa-copy.copied { background:#2a313b; color:var(--muted); }
+  #quick { padding:0 18px; }
+  #quick button { background:var(--accent2); font-size:13px; }
+  form#composer { display:flex; gap:10px; padding:14px 18px; border-top:1px solid var(--line); }
+  form#composer textarea { resize:none; height:44px; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="loginForm">
+    <h1>Turnover Briefing</h1>
+    <p>Staff login</p>
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+    <div id="loginErr"></div>
+    <button type="submit" style="width:100%; margin-top:14px;">Sign in</button>
+  </form>
+</div>
+
+<div id="chat" class="hidden">
+  <aside id="sidebar">
+    <button id="newChat" type="button">+ New chat</button>
+    <div id="convoList"></div>
+  </aside>
+  <div id="main">
+    <header>
+      <button id="menuBtn" type="button" aria-label="Conversations">☰</button>
+      <h1>Turnover Briefing</h1>
+      <button id="logout">Log out</button>
+    </header>
+    <div id="messages">
+      <div class="empty" id="emptyState">Ask about turnovers, or get tomorrow's briefing below.</div>
+    </div>
+    <div id="quick">
+      <button id="quickBriefing" type="button">Tomorrow's turnover briefing</button>
+    </div>
+    <form id="composer">
+      <textarea id="input" placeholder="e.g. What needs fixing before arrivals at the beach villa?"></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const history = [];  // {role, content} text turns — the context history
+let currentId = null;  // id of the conversation in the master JSON store
+
+function show(view) {
+  $("login").classList.toggle("hidden", view !== "login");
+  $("chat").classList.toggle("hidden", view !== "chat");
+  if (view === "chat") $("input").focus();
+}
+
+async function enterChat() {
+  show("chat");
+  await loadConvoList();
+  const last = localStorage.getItem("lastConvo");
+  if (last) await openConversation(last);
+  else newChat();
+}
+
+async function checkAuth() {
+  try {
+    const r = await fetch("/api/me");
+    const j = await r.json();
+    if (j.authenticated) await enterChat();
+    else show("login");
+  } catch { show("login"); }
+}
+
+// ---- conversation persistence (server-side master JSON) ------------------
+async function loadConvoList() {
+  try {
+    const r = await fetch("/api/conversations");
+    if (!r.ok) return;
+    const j = await r.json();
+    renderConvoList(j.conversations || []);
+  } catch {}
+}
+
+function renderConvoList(items) {
+  const list = $("convoList");
+  list.innerHTML = "";
+  for (const c of items) {
+    const row = document.createElement("div");
+    row.className = "convo" + (c.id === currentId ? " active" : "");
+    row.dataset.id = c.id;
+    const t = document.createElement("span");
+    t.className = "t"; t.textContent = c.title || "New conversation";
+    t.addEventListener("click", () => openConversation(c.id));
+    const del = document.createElement("button");
+    del.className = "del"; del.type = "button"; del.textContent = "✕"; del.title = "Delete";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await fetch("/api/conversations/" + c.id, { method: "DELETE" });
+      if (c.id === currentId) newChat();
+      loadConvoList();
+    });
+    row.append(t, del);
+    list.appendChild(row);
+  }
+}
+
+function markActive() {
+  document.querySelectorAll("#convoList .convo").forEach((el) =>
+    el.classList.toggle("active", el.dataset.id === currentId));
+}
+
+async function openConversation(cid) {
+  try {
+    const r = await fetch("/api/conversations/" + cid);
+    if (!r.ok) { newChat(); return; }
+    const convo = await r.json();
+    currentId = convo.id;
+    localStorage.setItem("lastConvo", currentId);
+    history.length = 0;
+    $("messages").innerHTML = "";
+    for (const m of convo.messages || []) {
+      const div = addMessage(m.role === "user" ? "user" : "bot");
+      if (m.role === "user") div.textContent = m.content;
+      else { div.innerHTML = render(m.content); addCopyButton(div, m.content); }
+      history.push({ role: m.role, content: m.content });
+    }
+    if (!history.length) $("messages").innerHTML = '<div class="empty">No messages yet.</div>';
+    markActive();
+    $("sidebar").classList.remove("open");
+  } catch { newChat(); }
+}
+
+function newChat() {
+  currentId = null;
+  localStorage.removeItem("lastConvo");
+  history.length = 0;
+  $("messages").innerHTML =
+    '<div class="empty" id="emptyState">Ask about turnovers, or get tomorrow\'s briefing below.</div>';
+  markActive();
+  $("sidebar").classList.remove("open");
+  $("input")?.focus();
+}
+
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("loginErr").textContent = "";
+  const r = await fetch("/api/login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ password: $("password").value }),
+  });
+  if (r.ok) { $("password").value = ""; await enterChat(); }
+  else { const j = await r.json().catch(() => ({})); $("loginErr").textContent = j.error || "Login failed."; }
+});
+
+$("logout").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" });
+  history.length = 0; currentId = null; $("convoList").innerHTML = "";
+  $("messages").innerHTML = '<div class="empty">Signed out.</div>';
+  show("login");
+});
+
+// Convert the model's markdown into WhatsApp-safe text. WhatsApp has no tables
+// and its monospace blocks wrap badly on phones, so:
+//  - markdown tables become one readable line per row: "N. *Name* — a · b · c"
+//    (proportional text that wraps cleanly; escaped pipes \| are kept literal)
+//  - headings (#) become a bold line
+//  - **bold** / __bold__ collapse to single *bold* (WhatsApp's bold)
+//  - [text](url) links collapse to just the text (WhatsApp auto-links bare URLs)
+//  - bullets (*, +, -) normalize to "- " so a list dash is never read as bold
+// The result never contains a doubled **, a leading #, or a markdown table grid.
+function toWhatsApp(md) {
+  const src = md.replace(/\r/g, "").split("\n");
+  const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+  const isSep = (l) => l.includes("-") && /^\s*\|?[\s:|-]+\|?\s*$/.test(l);
+  // split a row on UNescaped pipes, then unescape \| and drop cell markup
+  const splitRow = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/)
+    .map((c) => c.replace(/\\\|/g, "|").replace(/\*\*|`/g, "").trim());
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    if (isRow(src[i])) {                                 // markdown table -> readable lines
+      const rows = [];
+      while (i < src.length && isRow(src[i])) {
+        if (!isSep(src[i])) rows.push(splitRow(src[i]));
+        i++;
+      }
+      for (let r = 1; r < rows.length; r++) {            // skip the header row
+        const cells = rows[r].slice();
+        let num = "";
+        if (/^\d+\.?$/.test(cells[0] || "")) num = cells.shift().replace(/\.$/, "");
+        const name = cells.shift() || "";
+        const tail = cells.filter(Boolean);
+        out.push((num ? num + ". " : "") + "*" + name + "*" +
+                 (tail.length ? " — " + tail.join(" · ") : ""));
+      }
+      out.push("");
+      continue;
+    }
+    const h = src[i].match(/^\s*#{1,6}\s+(.*)$/);
+    if (h) { out.push("*" + h[1].trim().replace(/[*_]/g, "") + "*"); i++; continue; }
+    out.push(src[i].replace(/^(\s*)[-*+]\s+/, "$1- "));  // normalize bullets
+    i++;
+  }
+  let s = out.join("\n");
+  s = s.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, "$1");    // [text](url) -> text
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, "*$1*");           // **bold** -> *bold*
+  s = s.replace(/__([^_\n]+?)__/g, "*$1*");               // __bold__ -> *bold*
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Copy text to clipboard. Uses the async Clipboard API when it's available
+// (HTTPS / localhost), and otherwise falls back to a hidden <textarea> +
+// execCommand("copy"), which works on plain http:// over a LAN IP too.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "0"; ta.style.left = "0"; ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+async function copyWhatsApp(btn, md) {
+  const old = btn.dataset.label || btn.textContent;
+  btn.dataset.label = old;
+  const ok = await copyText(toWhatsApp(md));
+  btn.textContent = ok ? "✓ Copied for WhatsApp" : "✗ Couldn't copy — select & copy manually";
+  btn.classList.toggle("copied", ok);
+  setTimeout(() => { btn.textContent = old; btn.classList.remove("copied"); }, 2000);
+}
+
+// Minimal, safe markdown -> HTML (escape first, then light formatting).
+function render(text) {
+  let s = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const lines = s.split("\n");
+  let html = "", inList = false, i = 0;
+  const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+  const isSep = (l) => l.includes("-") && /^\s*\|?[\s:|-]+\|?\s*$/.test(l);
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, "|").trim());
+  while (i < lines.length) {
+    const line = lines[i];
+    if (isRow(line)) {
+      const rows = [];
+      while (i < lines.length && isRow(lines[i])) { if (!isSep(lines[i])) rows.push(cells(lines[i])); i++; }
+      if (inList) { html += "</ul>"; inList = false; }
+      html += "<table>";
+      rows.forEach((r, ri) => {
+        const tag = ri === 0 ? "th" : "td";
+        html += "<tr>" + r.map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
+      });
+      html += "</table>";
+      continue;
+    }
+    const h = line.match(/^#{1,4}\s+(.*)/);
+    const li = line.match(/^\s*[-*]\s+(.*)/);
+    if (li) { if (!inList) { html += "<ul>"; inList = true; } html += "<li>" + li[1] + "</li>"; i++; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (h) html += "<h3>" + h[1] + "</h3>";
+    else html += line + "\n";
+    i++;
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
+function addMessage(role) {
+  $("emptyState")?.remove();
+  const div = document.createElement("div");
+  div.className = "msg " + (role === "user" ? "user" : "bot");
+  $("messages").appendChild(div);
+  $("messages").scrollTop = $("messages").scrollHeight;
+  return div;
+}
+
+function addCopyButton(botDiv, full) {
+  const btn = document.createElement("button");
+  btn.className = "wa-copy"; btn.type = "button";
+  btn.textContent = "📋 Copy for WhatsApp";
+  btn.addEventListener("click", () => copyWhatsApp(btn, full));
+  botDiv.appendChild(btn);
+}
+
+async function ask(text) {
+  if (!text.trim()) return;
+  const userDiv = addMessage("user");
+  userDiv.textContent = text;
+  history.push({ role: "user", content: text });
+
+  const botDiv = addMessage("bot");
+  botDiv.textContent = "…";
+  setBusy(true);
+  let full = "";
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ messages: history, conversation_id: currentId }),
+    });
+    if (resp.status === 401) { show("login"); return; }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.replace(/^data: /, "");
+        if (line === "[DONE]") continue;
+        let obj; try { obj = JSON.parse(line); } catch { continue; }
+        if (obj.conversation_id) {        // server saved the turn; sync our id + list
+          currentId = obj.conversation_id;
+          localStorage.setItem("lastConvo", currentId);
+          loadConvoList();
+          continue;
+        }
+        if (obj.error) { full += "\n\n[Error: " + obj.error + "]"; }
+        else if (obj.text) { full += obj.text; }
+        botDiv.innerHTML = render(full);
+        $("messages").scrollTop = $("messages").scrollHeight;
+      }
+    }
+  } catch (e) {
+    full += "\n\n[Error: " + e.message + "]";
+    botDiv.innerHTML = render(full);
+  } finally {
+    if (full.trim()) {
+      history.push({ role: "assistant", content: full });
+      addCopyButton(botDiv, full);
+    }
+    setBusy(false);
+  }
+}
+
+function setBusy(b) {
+  $("send").disabled = b; $("quickBriefing").disabled = b; $("input").disabled = b;
+}
+
+$("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = $("input").value; $("input").value = ""; ask(v);
+});
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); }
+});
+$("quickBriefing").addEventListener("click", () =>
+  ask("Give me tomorrow's turnover briefing: list every turnover, flag same-day turnarounds, and the heads-up notes for staff from the guest conversations."));
+$("newChat").addEventListener("click", newChat);
+$("menuBtn").addEventListener("click", () => $("sidebar").classList.toggle("open"));
+
+checkAuth();
+</script>
+</body>
+</html>

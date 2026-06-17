@@ -12,10 +12,19 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "anthropic>=0.40",
+    "itsdangerous>=2.0",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.9",
+]
 
 [project.scripts]
 hospitality-mcp = "hospitality_mcp.server:main"
 hospitable-gateway = "hospitality_mcp.gateway:main"
+hospitality-web = "hospitality_mcp.web.app:main"
 
 [build-system]
 requires = ["hatchling"]

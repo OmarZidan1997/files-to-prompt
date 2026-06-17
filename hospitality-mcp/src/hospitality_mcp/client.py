@@ -75,6 +75,16 @@ class HospitalityClient(abc.ABC):
         """Luggage holds relevant to a set of reservations (see day_complaints)."""
         return self.luggage_holds(active_only=True)
 
+    def _turnover_cleaning(self, property_id: str, day: date):
+        """Cleaning assignment for a property's turnover on ``day``.
+
+        Returns ``(cleaner_name, CleaningStatus, extra_notes)``. The default uses
+        the date-less ``cleaner_for`` and assumes the clean is scheduled; backends
+        with a real tasks/crew API (e.g. Hospitable) override this to report the
+        actual assignee, status and time — and to flag turnovers with no cleaner.
+        """
+        return self.cleaner_for(property_id), CleaningStatus.SCHEDULED, []
+
     def turnovers_on(self, day: date) -> List[Turnover]:
         """Derive turnovers from check-ins and check-outs on ``day``.
 
@@ -116,6 +126,11 @@ class HospitalityClient(abc.ABC):
                 if in_res.notes:
                     notes.append(f"Check-in note: {in_res.notes}")
 
+            # Who is cleaning this turnover, and is it actually assigned? Sourced
+            # per-property-per-day so it reflects the real cleaning task.
+            cleaner, cleaning_status, cleaning_notes = self._turnover_cleaning(pid, day)
+            notes.extend(cleaning_notes)
+
             open_here = [c for c in open_complaints if c.property_id == pid]
             for c in open_here:
                 notes.append(f"OPEN issue ({c.severity.value}): {c.description}")
@@ -134,8 +149,8 @@ class HospitalityClient(abc.ABC):
                     date=day,
                     check_out_reservation_id=out_res.id if out_res else None,
                     check_in_reservation_id=in_res.id if in_res else None,
-                    cleaning_status=CleaningStatus.SCHEDULED,
-                    cleaner=self.cleaner_for(pid),
+                    cleaning_status=cleaning_status,
+                    cleaner=cleaner,
                     same_day_turnaround=same_day,
                     priority=priority,
                     notes=notes,

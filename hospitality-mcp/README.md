@@ -8,15 +8,146 @@ operational questions such as:
 > upcoming and current guests, complaints, luggage, anything per turnover or
 > check-in."
 
-There are two ways to run it:
+There are three ways to run it:
 
-1. **Gateway (recommended)** — `hospitable-gateway` connects to Hospitable's
-   own hosted MCP server, **re-exposes all of its tools**, and **adds** our
-   custom composite tools (most importantly `daily_turnover_briefing`). One
-   endpoint, every Hospitable tool *plus* the turnover briefing. ✅ verified
-   live against a real Hospitable account.
-2. **Standalone** — `hospitality-mcp` runs just our custom tools against either
+1. **Web app (for staff)** — `hospitality-web` is a password-protected chat
+   website where in-house / cleaning staff get an LLM-analyzed turnover prep
+   sheet and can ask open-ended questions. **This is the main thing most people
+   want — see [Web app for staff](#web-app-for-staff) for a copy-paste quick
+   start.**
+2. **Gateway** — `hospitable-gateway` connects to Hospitable's own hosted MCP
+   server, **re-exposes all of its tools**, and **adds** our custom composite
+   tools (most importantly `daily_turnover_briefing`). One endpoint, every
+   Hospitable tool *plus* the turnover briefing. ✅ verified live against a real
+   Hospitable account.
+3. **Standalone** — `hospitality-mcp` runs just our custom tools against either
    bundled **mock** data or the Hospitable Public API directly.
+
+## Web app for staff
+
+A simple website (one shared password) with a chat box and a **"Tomorrow's
+turnover briefing"** button. Claude (`claude-opus-4-8`) can use:
+
+- the custom **turnover briefing** (reads full guest conversations → prioritized
+  prep sheet: same-day turnarounds first, plus genuine heads-up notes — damage to
+  fix, restock, early/late check-in, extra guests, luggage, complaints — grounded
+  in what guests actually wrote), and
+- **Hospitable's full read-only toolset** (properties, reservations, messages,
+  **reviews**, tasks, calendar, upsells, payouts, …) plus `create-task`.
+
+So staff can ask open-ended questions — e.g. *"for each flat, pull the reviews,
+flag the recurring problems with how many guests mentioned each, translate any
+foreign-language comments, and give me a list of things to fix or buy."* Write /
+guest-facing actions (sending messages, responding to reviews, cancelling,
+smart-locks) are intentionally **not** exposed; if a request needs one, the bot
+says it can't do it.
+
+### Run it locally (5 steps)
+
+You need **Python 3.10+** and the four secrets in the table below (a Hospitable
+account + an Anthropic API key).
+
+```bash
+# 1. Get the code and enter it
+cd hospitality-mcp
+
+# 2. Create an isolated environment (avoids the "externally-managed-environment"
+#    pip error on modern macOS/Debian/Ubuntu) and install the web extras
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -e ".[web]"
+
+# 3. Create your config from the template
+cp env.example .env
+
+# 4. Edit .env and fill in the values (see the table below).
+#    Tip — generate a strong SESSION_SECRET:
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+# 5. Start the server
+hospitality-web                      # serves on http://localhost:8000
+```
+
+Then open **http://localhost:8000**, log in with your `APP_PASSWORD`, and click
+**Tomorrow's turnover briefing** or just type a question.
+
+> After the first install you only need steps **2 (`source .venv/bin/activate`)**
+> and **5 (`hospitality-web`)** to start it again.
+
+### Configuration (`.env`)
+
+`.env` is gitignored and holds everything — no other manual setup:
+
+| Var | Required | What | Where to get it |
+| --- | --- | --- | --- |
+| `HOSPITABLE_ACCESS_TOKEN` | ✅ | Hospitable Personal Access Token (`pat:read`) — used by the turnover briefing | Hospitable → Settings → API access |
+| `HOSPITABLE_MCP_TOKEN` | ✅ | Hospitable bearer (`mcp:use`) — the full Hospitable toolset | Hospitable → AI agents → Fallback bearer tokens |
+| `ANTHROPIC_API_KEY` | ✅ | Anthropic API key (powers Claude) | console.anthropic.com → API keys |
+| `APP_PASSWORD` | ✅ | the shared staff login password (pick anything) | you choose it |
+| `SESSION_SECRET` | ✅ | long random string that signs the login cookie | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `PORT` | — | listen port (default `8000`) | optional |
+
+### Deploy it (Docker)
+
+The repo ships a `Dockerfile`. Secrets are **passed at run time**, never baked
+into the image:
+
+```bash
+docker build -t turnover-web .
+docker run --env-file .env -p 8000:8000 turnover-web
+```
+
+The app is now on `http://localhost:8000`. To run it in the background add
+`-d --restart unless-stopped`.
+
+### Deploy to Render (live, for staff)
+
+The repo ships a `render.yaml` blueprint, so going live is mostly clicking
+through a wizard. Render terminates HTTPS and gives a free
+`https://<name>.onrender.com` URL — which is what makes the copy-to-clipboard
+button work and keeps the login cookie secure.
+
+1. **Push to GitHub** (a private repo is fine — secrets are never committed):
+   ```bash
+   git add -A && git commit -m "Add Render deploy config" && git push
+   ```
+2. **Create the service:** Render Dashboard → **New → Blueprint** → pick this
+   repo. Render reads `render.yaml` and provisions one web service + a 1 GB
+   persistent disk (mounted at `/data`, where the conversations JSON lives so
+   chats survive redeploys).
+3. **Fill in the secrets:** Render prompts for the four `sync: false` vars.
+   Paste the **same values from your local `.env`**:
+   `HOSPITABLE_ACCESS_TOKEN`, `HOSPITABLE_MCP_TOKEN`, `ANTHROPIC_API_KEY`,
+   `APP_PASSWORD`. (`SESSION_SECRET`, `COOKIE_SECURE`, `CONVERSATIONS_FILE` and
+   `PORT` are handled automatically — leave them alone.)
+4. **Deploy.** First build takes a few minutes. When it's live, open the
+   `onrender.com` URL, confirm you can log in with `APP_PASSWORD`, and generate
+   a briefing.
+5. **Share** the URL + `APP_PASSWORD` with your staff. To rotate the password
+   later, change `APP_PASSWORD` in the Render dashboard and redeploy.
+
+> **Note on plan:** `render.yaml` uses the `starter` plan because persistent
+> disks (for saved conversations) aren't available on the free plan. If you
+> don't need chat history to survive redeploys, you can switch to `free` and
+> drop the `disk:` block — chats then live only in memory of the current
+> container.
+
+**Other hosts** (Fly.io, Railway, a plain VM) work the same way: point them at
+the `Dockerfile`, set the env vars from the table above in their dashboard
+(**never** upload `.env`), set `COOKIE_SECURE=true`, give `CONVERSATIONS_FILE` a
+path on a persistent volume, and expose port `8000` (or whatever `PORT` they
+require).
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `error: externally-managed-environment` on `pip install` | You skipped the venv — run step 2 (`python3 -m venv .venv && source .venv/bin/activate`). |
+| `command not found: hospitality-web` | The venv isn't active — `source .venv/bin/activate`. |
+| Login rejects the right password | `APP_PASSWORD` in `.env` has stray quotes/spaces, or the server was started before you edited `.env` — restart it. |
+| Chat errors out / no reply | Check `ANTHROPIC_API_KEY` is set and valid. |
+| Reviews / reservation tools "can't connect" | `HOSPITABLE_MCP_TOKEN` is missing or lacks `mcp:use`. The briefing still works on `HOSPITABLE_ACCESS_TOKEN` alone. |
+| `GET stream disconnected, reconnecting…` in logs | Harmless — the MCP transport's notification channel reconnecting. Tool calls still succeed. |
 
 ## The gateway
 

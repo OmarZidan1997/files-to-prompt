@@ -1,16 +1,23 @@
-"""One-shot: fetch the June 1 turnover briefing via the gateway and write a
-readable, ASCII-clean markdown list."""
+"""One-shot: fetch a turnover briefing via the gateway and write a readable,
+ASCII-clean markdown list.
+
+Usage:
+    python scripts/make_list.py            # tomorrow (default)
+    python scripts/make_list.py 2026-06-12 # a specific day (ISO date, weekday,
+                                           # 'today', 'tomorrow', or an offset like '+2')
+"""
 import asyncio
 import json
 import os
+import sys
 import unicodedata
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-CFG = Path("/home/user/.config/hospitable")
-OUT = Path(__file__).resolve().parent.parent / "turnover_2026-06-01.md"
+CFG = Path.home() / ".config" / "hospitable"
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def aa(s: str) -> str:
@@ -25,10 +32,24 @@ def aa(s: str) -> str:
     return s.encode("ascii", "replace").decode("ascii")
 
 
+def _cred(env_name, fname):
+    """Prefer an already-set env var (e.g. from .env); fall back to the config file."""
+    val = os.environ.get(env_name)
+    if val:
+        return val
+    return (CFG / fname).read_text().strip()
+
+
 async def get_briefing(day):
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(ROOT / ".env")
+    except ImportError:
+        pass
     env = dict(os.environ)
-    env["HOSPITABLE_MCP_TOKEN"] = (CFG / "mcp_token").read_text().strip()
-    env["HOSPITABLE_ACCESS_TOKEN"] = (CFG / "pat").read_text().strip()
+    env["HOSPITABLE_MCP_TOKEN"] = _cred("HOSPITABLE_MCP_TOKEN", "mcp_token")
+    env["HOSPITABLE_ACCESS_TOKEN"] = _cred("HOSPITABLE_ACCESS_TOKEN", "pat")
     env["PYTHONPATH"] = "src"
     params = StdioServerParameters(command="python", args=["-m", "hospitality_mcp.gateway"], env=env)
     async with stdio_client(params) as (r, w):
@@ -52,7 +73,13 @@ def fmt(d):
         return []
 
     sm = d["summary"]
-    L = ["# Turnover List - Sunday, 1 June 2026", ""]
+    try:
+        from datetime import date as _date
+
+        title_date = _date.fromisoformat(str(d["date"])).strftime("%A, %-d %B %Y")
+    except Exception:
+        title_date = str(d.get("date", ""))
+    L = [f"# Turnover List - {title_date}", ""]
     L.append(f"{sm['turnovers']} turnovers | {sm['same_day_turnarounds']} same-day turnaround | "
              f"{sm['check_outs']} check-outs | {sm['check_ins']} check-ins | "
              f"{sm['open_complaints']} complaints | {sm['luggage_holds']} luggage requests")
@@ -92,9 +119,11 @@ def fmt(d):
 
 
 def main():
-    d = asyncio.run(get_briefing("2026-06-01"))
-    OUT.write_text(fmt(d), encoding="utf-8")
-    print("wrote", OUT, "-", len(d["turnovers"]), "turnovers")
+    day = sys.argv[1] if len(sys.argv) > 1 else "tomorrow"
+    d = asyncio.run(get_briefing(day))
+    out = ROOT / f"turnover_{d['date']}.md"
+    out.write_text(fmt(d), encoding="utf-8")
+    print("wrote", out, "-", len(d["turnovers"]), "turnovers")
 
 
 if __name__ == "__main__":

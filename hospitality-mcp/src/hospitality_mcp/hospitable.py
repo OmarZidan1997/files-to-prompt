@@ -14,11 +14,12 @@ Docs: https://developer.hospitable.com/docs/public-api-docs/
     GET  reservations/{id}/messages
     POST reservations/{id}/messages   (send a guest message)
 
-Hospitable has no native concept of cleaning crews, complaints, or luggage
-holds, so ``cleaner_for`` / ``complaints`` / ``luggage_holds`` return empty.
-Turnovers are still derived from real check-in / check-out data by the shared
-logic in the base class. (Those gaps could later be filled by scanning guest
-messages or an external ops system.)
+Cleaners come from Hospitable's Tasks API: each turnover's cleaning task
+(``task_type`` 1) carries the assigned ``teammate`` and an assignment status, so
+``cleaner_for`` / ``_turnover_cleaning`` report who is cleaning (and flag clears
+with no cleaner assigned). Hospitable has no native concept of complaints or
+luggage holds, so those are derived by scanning genuine guest messages.
+Turnovers are derived from real check-in / check-out data by the base class.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import httpx
 
 from .client import HospitalityClient
 from .models import (
+    CleaningStatus,
     Complaint,
     ComplaintStatus,
     Guest,
@@ -151,6 +153,8 @@ class HospitableClient(HospitalityClient):
         self._properties: Optional[List[Property]] = None
         self._guests: Dict[str, Guest] = {}
         self._reservation_windows: Dict[tuple, List[Reservation]] = {}
+        # property_id -> cleaning task, cached per day
+        self._cleaning_task_days: Dict[date, Dict[str, dict]] = {}
 
     # --- HTTP plumbing -----------------------------------------------------
     def _get_collection(
@@ -326,8 +330,87 @@ class HospitableClient(HospitalityClient):
         # via include=guest rather than a standalone endpoint).
         return self._guests.get(guest_id)
 
+    # Hospitable task type for a cleaning job (see get-tasks metadata).
+    _CLEANING_TASK_TYPE = 1
+
+    def _cleaning_tasks_on(self, day: date) -> Dict[str, dict]:
+        """property_id -> the cleaning task on ``day`` (assigned one preferred)."""
+        if day not in self._cleaning_task_days:
+            params: Dict[str, Any] = {
+                "start_date": day.isoformat(),
+                "end_date": day.isoformat(),
+            }
+            uuids = [p.id for p in self.list_properties() if p.id]
+            if uuids:
+                params["properties[]"] = uuids
+            try:
+                raw = self._get_collection("tasks", params=params)
+            except httpx.HTTPError:
+                raw = []
+            by_prop: Dict[str, dict] = {}
+            for t in raw:
+                if t.get("task_type") != self._CLEANING_TASK_TYPE:
+                    continue
+                if self._parse_date(t.get("start_date")) != day:  # tz-local match
+                    continue
+                pid = str((t.get("property") or {}).get("id") or "")
+                if not pid:
+                    continue
+                current = by_prop.get(pid)
+                # keep an assigned task over an unassigned duplicate
+                if current is None or (not current.get("teammate") and t.get("teammate")):
+                    by_prop[pid] = t
+            self._cleaning_task_days[day] = by_prop
+        return self._cleaning_task_days[day]
+
+    @staticmethod
+    def _task_time_range(task: dict) -> str:
+        def hm(v: Any) -> str:
+            s = str(v or "")
+            return s.split("T", 1)[1][:5] if "T" in s else ""
+
+        start, end = hm(task.get("start_date")), hm(task.get("end_date"))
+        if start and end:
+            return f"{start}-{end}"
+        return start
+
+    @staticmethod
+    def _cleaning_status(task: dict) -> CleaningStatus:
+        progress = str(task.get("progress_status") or "").lower()
+        assign = str((task.get("task_assignment") or {}).get("status") or "").lower()
+        if progress == "completed":
+            return CleaningStatus.DONE
+        if progress in ("in_progress", "on_the_way", "arrived"):
+            return CleaningStatus.IN_PROGRESS
+        if progress == "cancelled" or assign in ("cancelled", "rejected"):
+            return CleaningStatus.BLOCKED
+        return CleaningStatus.SCHEDULED
+
     def cleaner_for(self, property_id: str) -> Optional[str]:
-        return None  # not modeled by Hospitable's public API
+        """Cleaner assigned to today's cleaning task for a property (if any)."""
+        task = self._cleaning_tasks_on(date.today()).get(property_id)
+        teammate = (task or {}).get("teammate") or {}
+        return teammate.get("name") or None
+
+    def _turnover_cleaning(self, property_id: str, day: date):
+        """Real cleaning assignment for a turnover, from Hospitable tasks:
+        (cleaner_name, CleaningStatus, notes). Clearly flags an unassigned clean."""
+        task = self._cleaning_tasks_on(day).get(property_id)
+        if not task:
+            return None, CleaningStatus.NOT_SCHEDULED, [
+                "CLEANING: no cleaning task scheduled for this turnover."
+            ]
+        name = ((task.get("teammate") or {}).get("name")) or None
+        status = self._cleaning_status(task)
+        slot = self._task_time_range(task)
+        when = f" ({slot})" if slot else ""
+        if name:
+            assign = str((task.get("task_assignment") or {}).get("status") or "").lower()
+            tag = f", {assign}" if assign and assign != "accepted" else ""
+            note = f"CLEANING: {name}{when}{tag}."
+        else:
+            note = f"CLEANING: NO cleaner assigned yet{when} — needs assigning."
+        return name, status, [note]
 
     def _reservations_window(self, center: date) -> List[Reservation]:
         start = center - timedelta(days=self.window_days)

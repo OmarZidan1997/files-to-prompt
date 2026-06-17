@@ -74,6 +74,11 @@ def daily_briefing(client: HospitalityClient, day: str = "tomorrow") -> Dict[str
             )
         elif t.priority == "high":
             alerts.append(f"High-priority turnover at {t.property_name}.")
+    # Cleaners not yet assigned — same-day turnarounds first, they're the riskiest.
+    unassigned = [t for t in turnovers if not t.cleaner]
+    for t in sorted(unassigned, key=lambda t: not t.same_day_turnaround):
+        tag = " (SAME-DAY)" if t.same_day_turnaround else ""
+        alerts.append(f"NO CLEANER ASSIGNED at {t.property_name}{tag} — assign someone.")
     for c in open_complaints:
         if c.severity.value in ("high", "urgent"):
             prop = client.get_property(c.property_id)
@@ -90,6 +95,7 @@ def daily_briefing(client: HospitalityClient, day: str = "tomorrow") -> Dict[str
                 "open_complaints": len(open_complaints),
                 "luggage_holds": len(luggage),
                 "same_day_turnarounds": sum(1 for t in turnovers if t.same_day_turnaround),
+                "cleaners_unassigned": sum(1 for t in turnovers if not t.cleaner),
             },
             "alerts": alerts,
             "turnovers": turnovers,
